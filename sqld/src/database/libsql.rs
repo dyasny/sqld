@@ -18,7 +18,7 @@ use super::{Database, TXN_TIMEOUT_SECS};
 /// Internal message used to communicate between the database thread and the `LibSqlDb` handle.
 struct Message {
     queries: Queries,
-    resp: oneshot::Sender<(Vec<QueryResult>, State)>,
+    resp: oneshot::Sender<(Result<Vec<QueryResult>>, State)>,
 }
 
 #[derive(Clone)]
@@ -206,7 +206,7 @@ impl LibSqlDb {
 
             let mut state = ConnectionState::initial();
             let mut timedout = false;
-            loop {
+            'main_loop: loop {
                 let Message { queries, resp } = match state.deadline() {
                     Some(deadline) => match receiver.recv_deadline(deadline) {
                         Ok(msg) => msg,
@@ -229,15 +229,38 @@ impl LibSqlDb {
                     let mut results = Vec::with_capacity(queries.queries.len());
                     for query in queries.queries {
                         let result = handle_query(&conn, query, &mut state);
-                        results.push(result);
+                        if queries.is_transactional {
+                            if let Err(e) = result {
+                                // check for transaction: http://www.sqlite.org/c3ref/get_autocommit.html
+                                if !conn.is_autocommit() {
+                                    rollback(&conn);
+                                }
+                                state.reset();
+                                ok_or_exit!(resp.send((Err(e), state.state)));
+                                break 'main_loop;
+                            }
+                        } else {
+                            results.push(result);
+                        }
                     }
-                    ok_or_exit!(resp.send((results, state.state)));
+
+                    // this is a transactional batch, and the transaction is still open.
+                    if queries.is_transactional && !conn.is_autocommit() {
+                        // check for transaction: http://www.sqlite.org/c3ref/get_autocommit.html
+                        if !conn.is_autocommit() {
+                            rollback(&conn);
+                        }
+                        state.reset();
+                        ok_or_exit!(resp.send((Err(Error::DanglingTxn), state.state)));
+                    } else {
+                        ok_or_exit!(resp.send((Ok(results), state.state)));
+                    }
                 } else {
                     // fail all the queries in the batch with timeout error
                     let errors = (0..queries.queries.len())
                         .map(|idx| Err(Error::LibSqlTxTimeout(idx)))
                         .collect();
-                    ok_or_exit!(resp.send((errors, state.state)));
+                    ok_or_exit!(resp.send((Ok(errors), state.state)));
                     timedout = false;
                 }
             }
@@ -249,7 +272,7 @@ impl LibSqlDb {
 
 #[async_trait::async_trait]
 impl Database for LibSqlDb {
-    async fn execute(&self, queries: Queries) -> Result<(Vec<QueryResult>, State)> {
+    async fn execute(&self, queries: Queries) -> Result<(Result<Vec<QueryResult>>, State)> {
         let (resp, receiver) = oneshot::channel();
         let msg = Message { queries, resp };
         let _ = self.sender.send(msg);

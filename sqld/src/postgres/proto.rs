@@ -31,14 +31,16 @@ impl<'a, S> QueryHandler<'a, S> {
 
     async fn handle_queries(&self, queries: Queries) -> PgWireResult<Vec<Response>>
     where
-        S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+        S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error>
+            + Sync
+            + Send,
         S::Future: Send,
     {
         let mut s = self.0.lock().await;
         //FIXME: handle poll_ready error
         poll_fn(|cx| s.poll_ready(cx)).await.unwrap();
         match s.call(queries).await {
-            Ok(responses) => Ok(responses
+            Ok(Ok(responses)) => Ok(responses
                 .into_iter()
                 .map(|r| match r {
                     Ok(QueryResponse::ResultSet(set)) => set.into(),
@@ -47,7 +49,9 @@ impl<'a, S> QueryHandler<'a, S> {
                     ),
                 })
                 .collect()),
-
+            Ok(Err(e)) => Ok(vec![Response::Error(
+                ErrorInfo::new("ERROR".into(), "XX000".into(), e.to_string()).into(),
+            )]),
             Err(e) => Err(PgWireError::ApiError(e.into())),
         }
     }
@@ -56,7 +60,7 @@ impl<'a, S> QueryHandler<'a, S> {
 #[async_trait::async_trait]
 impl<'a, S> SimpleQueryHandler for QueryHandler<'a, S>
 where
-    S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+    S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error> + Sync + Send,
     S::Future: Send,
 {
     async fn do_query<C>(&self, _client: &C, query: &str) -> PgWireResult<Vec<Response>>
@@ -90,7 +94,7 @@ where
 #[async_trait::async_trait]
 impl<'a, S> ExtendedQueryHandler for QueryHandler<'a, S>
 where
-    S: Service<Queries, Response = Vec<QueryResult>, Error = Error> + Sync + Send,
+    S: Service<Queries, Response = crate::Result<Vec<QueryResult>>, Error = Error> + Sync + Send,
     S::Future: Send,
 {
     async fn do_query<C>(
