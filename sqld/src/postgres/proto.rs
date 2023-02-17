@@ -73,7 +73,13 @@ where
             .collect::<anyhow::Result<Vec<_>>>();
 
         match queries {
-            Ok(queries) => self.handle_queries(queries).await,
+            Ok(queries) => {
+                let queries = Queries {
+                    queries,
+                    is_transactional: false,
+                };
+                self.handle_queries(queries).await
+            }
             Err(e) => Err(PgWireError::UserError(
                 ErrorInfo::new("ERROR".to_string(), "XX000".to_string(), e.to_string()).into(),
             )),
@@ -111,7 +117,12 @@ where
         let params = parse_params(portal.parameter_types(), portal.parameters());
 
         let query = Query { stmt, params };
-        self.handle_queries(vec![query]).await.map(|mut res| {
+        let queries = Queries {
+            queries: vec![query],
+            is_transactional: false,
+        };
+
+        self.handle_queries(queries).await.map(|mut res| {
             assert_eq!(res.len(), 1);
             res.pop().unwrap()
         })
